@@ -1,0 +1,620 @@
+/*
+ *      RFBthread.goc
+ *
+ *      by Marcus Groeber
+ */
+
+@include <stdapp.goh>
+@include <socket.goh>
+@include <Objects/clipbrd.goh>
+#include <sockmisc.h>
+#include <thread.h>
+#include <sem.h>
+
+#include <ansi/string.h>
+#include <ansi/stdio.h>
+#include <ansi/stdlib.h>
+
+@include "vncview.goh"
+
+
+byte buf[2048];
+long rci = 0;
+
+SocketError SendData(RFBlink *link, byte *buf, word size)
+{
+    LOG( word i; )
+    SocketError err;
+
+    LOG( LogPrintf(">"); )
+    LOG( for(i=0; i<size; i++) )
+    LOG(   LogPrintf(" %02x", buf[i]); )
+
+#ifndef NOSOCKET
+    if(link->RL_socket)                 /* ignore if playback file */
+      err = SocketSend(link->RL_socket, buf, size, NULL, 0);
+    else
+#endif
+      err = RFBE_NO_ERROR;
+
+    LOG( if(err) )
+    LOG(   LogPrintf(" - result: %d", err); )
+    LOG( LogPrintf("\r\n"); )
+
+    return err;
+}
+
+SocketError ReceiveData(RFBlink *link, byte *buf, word size)
+{
+    register word i, got;
+    word rcv, n;
+    SocketError err;
+
+    got = 0;
+    err = SE_NORMAL;
+    while(got < size && err == SE_NORMAL)
+    {
+      /* while buffer is empty, try to stuff it */
+      while(link->RL_readBufPtr == link->RL_readBufTop && err == SE_NORMAL)
+      {
+        if(link->RL_socket)             /* get from socket or playback file? */
+        {
+#ifndef NOSOCKET
+          rcv = SocketRecv(link->RL_socket, link->RL_readBuf, RFB_READ_BUF_SIZE,
+            RFB_RECEIVE_TIMEOUT, 0, NULL);
+
+          if(rcv)                       /* store data to playback file */
+            FileWrite(link->RL_playbackFile, link->RL_readBuf, rcv, 0);
+          else
+            err = ThreadGetError();
+#endif
+        }
+        else
+        {
+          rcv = FileRead(link->RL_playbackFile,
+            link->RL_readBuf, RFB_READ_BUF_SIZE, 0);
+          if(!rcv)                      /* hit end of file */
+          {
+#if 0
+            err = SE_CONNECTION_CLOSED;
+            link->RL_abort = TRUE;      /* cannot go any further anyway... */
+#else
+            err = SE_TIMEOUT;
+            TimerSleep(60);
+#endif
+          }
+        }
+
+        link->RL_readBufPtr = 0;
+        link->RL_readBufTop = rcv;      /* store new buffer params */
+      }
+
+      /* transfer data from buffer */
+      n = size-got;                     /* amount of data to be read */
+      if(link->RL_readBufPtr + n > link->RL_readBufTop)
+        n = link->RL_readBufTop - link->RL_readBufPtr;
+
+      for(i=0; i<n; i++)                /* make sure transfer is inlined */
+        buf[got++] = link->RL_readBuf[link->RL_readBufPtr++];
+    }
+
+    LOG( LogPrintf("<"); )
+    LOG( for(i=0; i<got; i++) )
+    LOG(     LogPrintf(" %02x", buf[i]); )
+    LOG(   if(err) )
+    LOG(     LogPrintf(" - result: %d", err); )
+    LOG(   LogPrintf("\r\n"); )
+
+    return err;
+}
+
+
+void LOCAL SetAreaColor(RFBlink *link, byte color)
+{
+    if(color != link->RL_cachedFillColor)
+    {
+      link->RL_cachedFillColor = color;
+
+      GrSetAreaColor(link->RL_frameBitmap, CF_INDEX,
+        link->RL_color[color], 0, 0);
+    }
+}
+
+void LOCAL FillRect(RFBlink *link, byte color, word x, word y, word w, word h)
+{
+    SetAreaColor(link, color);
+    GrFillRect(link->RL_frameBitmap, x, y, x+w, y+h);
+}
+
+void LOCAL DrawPoint(RFBlink *link, byte color, word x, word y)
+{
+    SetAreaColor(link, color);
+    GrDrawPoint(link->RL_frameBitmap, x, y);
+}
+
+void LOCAL DrawBitmap(RFBlink *link, word x, word y, Bitmap *bmp)
+{
+    if(link->RL_bmFormat == BMF_4BIT)
+    {
+      byte *data;
+      word x1, y1;
+      register p1, p2;
+
+      data = ((byte *)bmp) + sizeof(Bitmap);
+      p1 = p2 = 0;
+      for(y1=0; y1<bmp->B_height; y1++)
+        for(x1=0; x1<bmp->B_width; x1+=2)
+          if(x1+1<bmp->B_width)
+          {
+            data[p1++] = (data[p2+1] & 0x0F) | (data[p2] << 4);
+            p2 += 2;
+          }
+          else
+            data[p1++] = (data[p2++] << 4);
+      bmp->B_type = BMF_4BIT;
+    }
+    else
+      bmp->B_type = BMF_8BIT;
+
+    GrDrawImage(link->RL_frameBitmap, x, y, IBS_1, bmp);
+}
+
+void LOCAL CopyRectangle(RFBlink *link, word x, word y, word dx, word dy,
+  word w, word h)
+{
+    word line;
+
+    for(line=0; line<h; line++)         /* transfer data in memory */
+      GrBitBlt(link->RL_frameBitmap, x, y+line, dx, dy+line, w, 1, BLTM_COPY);
+}
+
+void LOCAL FillTileRect(byte *bmp, byte tw,
+  byte color, word x, word y, word w, word h)
+{
+    register word xp;
+
+    if(y+h>16 || x+w>tw)                /* guard against bad rectangles */
+    {
+      LOG( LogPrintf("Bad FillTileRect!\r\n"); )
+      return;
+    }
+
+    bmp += x + y*tw;
+    for(; h; h--,bmp+=tw)
+      for(xp=0; xp<w; xp++)
+        bmp[xp] = color;
+}
+
+
+RFBError LOCAL ProcessFramebufferUpdate(RFBlink *link)
+{
+    rfbFramebufferUpdateMsg upd;
+    rfbFramebufferUpdateRectHeader rect;
+    word i, j, x, y, xp, yp, rh, rw;
+
+    LOG( LogPrintf("--- Framebuffer Update\r\n"); )
+
+    if(ReceiveData(link, ((byte *)&upd)+1, sizeof(upd)-1))
+      return RFBE_COMM_ERROR;
+
+    for(i=0; i<card16(upd.nRects); i++)
+    {
+      if(ReceiveData(link, &rect, sizeof(rect)))
+        return RFBE_COMM_ERROR;
+
+      xp = card16(rect.r.x);
+      yp = card16(rect.r.y);
+      rw = card16(rect.r.w);
+      rh = card16(rect.r.h);
+
+      LOG( LogPrintf("-- Rect \x40(%u,%u) %ux%u enc=%ld\r\n", \
+                     xp, yp, rw, rh, card32(rect.encoding)); )
+
+      switch(card32(rect.encoding))
+      {
+        case rfbEncodingRaw:
+          for(y=0; y<rh; y++)           /* raw encoded lines */
+          {
+            if(ReceiveData(link, buf, rw))
+              return RFBE_COMM_ERROR;   /* get one line */
+
+            for(x=0; x<rw; x++)
+              DrawPoint(link, buf[x], xp+x, yp+y);
+          }
+          break;
+
+        case rfbEncodingCopyRect:
+          {
+            rfbCopyRect encdata;
+            word sx,sy;
+
+            if(ReceiveData(link, &encdata, sizeof(encdata)))
+              return RFBE_COMM_ERROR;   /* get encoding header */
+
+            sx = card16(encdata.srcX);
+            sy = card16(encdata.srcY);
+
+            CopyRectangle(link, sx, sy, x, y, rw, rh);
+          }
+          break;
+
+        case rfbEncodingRRE:
+          {
+            struct {
+              rfbRREHeader h;
+              byte backgroundPixelValue;
+            } encdata;
+            struct {
+              byte subrectPixelValue;
+              rfbRectangle r;
+            } subrect;
+
+            if(ReceiveData(link, &encdata, sizeof(encdata)))
+              return RFBE_COMM_ERROR;   /* get encoding header */
+
+            FillRect(link, encdata.backgroundPixelValue, x, y, rw, rh);
+
+            for(j=0; j<card16(encdata.h.nSubrects); j++)
+            {
+              if(ReceiveData(link, &subrect, sizeof(subrect)))
+                return RFBE_COMM_ERROR;    /* get subrect header */
+              FillRect(link, subrect.subrectPixelValue,
+                card16(subrect.r.x), card16(subrect.r.y),
+                card16(subrect.r.w), card16(subrect.r.h));
+            }
+          }
+          break;
+
+        case rfbEncodingCoRRE:
+          {
+            struct {
+              rfbRREHeader h;
+              byte backgroundPixelValue;
+            } encdata;
+            struct {
+              byte subrectPixelValue;
+              rfbCoRRERectangle r;
+            } csubrect;
+
+            if(ReceiveData(link, &encdata, sizeof(encdata)))
+              return RFBE_COMM_ERROR;   /* get encoding header */
+
+            FillRect(link, encdata.backgroundPixelValue, x, y, rw, rh);
+
+            for(j=0; j<card16(encdata.h.nSubrects); j++)
+            {
+              if(ReceiveData(link, &csubrect, sizeof(csubrect)))
+                return RFBE_COMM_ERROR;    /* get subrect header */
+              FillRect(link, csubrect.subrectPixelValue,
+                csubrect.r.x, csubrect.r.y,
+                csubrect.r.w, csubrect.r.h);
+            }
+          }
+          break;
+
+        case rfbEncodingHextile:
+          {
+            byte tw, th;                /* subrect width, height */
+            byte y2;
+            int k;
+            CARD8 subencoding;
+            CARD8 backColor=0;
+            CARD8 foreColor=0;
+            CARD8 nSubrects;
+            struct {
+              byte xAndYPosition;
+              byte widthAndHeight;
+            } hsubrect;
+
+            struct {
+              Bitmap bmp;
+              byte   data[256];
+            } tileBitmap;
+
+            for(y=0; y<rh; y+=16)       /* iterate tiles */
+              for(x=0; x<rw; x+=16)
+              {
+                tw = th = 16;           /* default tile width/height */
+                if(x+tw>rw)             /* limit width/height to bounds */
+                  tw = rw-x;
+                if(y+th>rh)
+                  th = rh-y;
+
+                tileBitmap.bmp.B_width = tw;
+                tileBitmap.bmp.B_height = th;
+                tileBitmap.bmp.B_compact = BMC_UNCOMPACTED;
+
+                LOG( LogPrintf("- New Tile\r\n"); )
+
+                if(ReceiveData(link, &subencoding, sizeof(subencoding)))
+                  return RFBE_COMM_ERROR;  /* get encoding header */
+
+                if(subencoding & rfbHextileRaw)
+                {                           /* raw encoded data */
+                  for(y2=0; y2<th; y2++)
+                  {
+                    if(ReceiveData(link, tileBitmap.data+y2*tw, tw))
+                      return RFBE_COMM_ERROR;     /* get one line */
+                  }
+
+                  /* convert colors in tile */
+                  for(k=tw*th-1; k>=0; k--)
+                    tileBitmap.data[k] = link->RL_color[tileBitmap.data[k]];
+
+                  DrawBitmap(link, xp+x, yp+y, &tileBitmap.bmp);
+                }
+                else                        /* subrect encoded data */
+                {
+                  if(subencoding & rfbHextileBackgroundSpecified)
+                    if(ReceiveData(link, &backColor, sizeof(backColor)))
+                      return RFBE_COMM_ERROR;    /* get background color */
+
+                  if(subencoding & rfbHextileForegroundSpecified)
+                    if(ReceiveData(link, &foreColor, sizeof(foreColor)))
+                      return RFBE_COMM_ERROR;    /* get foreground color */
+
+                  if(subencoding & rfbHextileAnySubrects)
+                  {
+                    FillTileRect(&tileBitmap.data, tw,
+                      link->RL_color[backColor], 0, 0, tw, th);
+
+                    if(ReceiveData(link, &nSubrects, sizeof(nSubrects)))
+                      return RFBE_COMM_ERROR;    /* get number of subrects */
+
+                    for(j=0; j<nSubrects; j++)
+                    {
+                      if(subencoding & rfbHextileSubrectsColoured)
+                        if(ReceiveData(link, &foreColor, sizeof(foreColor)))
+                          return RFBE_COMM_ERROR;/* get foreground color */
+
+                      if(ReceiveData(link, &hsubrect, sizeof(hsubrect)))
+                        return RFBE_COMM_ERROR;  /* subrect coordinates */
+
+                      FillTileRect(&tileBitmap.data, tw,
+                        link->RL_color[foreColor],
+                        rfbHextileExtractX(hsubrect.xAndYPosition),
+                        rfbHextileExtractY(hsubrect.xAndYPosition),
+                        rfbHextileExtractW(hsubrect.widthAndHeight),
+                        rfbHextileExtractH(hsubrect.widthAndHeight));
+                    }
+
+                    DrawBitmap(link, xp+x, yp+y, &tileBitmap.bmp);
+                  }
+                  else
+                  {
+                    FillRect(link, backColor, xp+x, yp+y, tw, th);
+                  }
+                }
+              }
+          }
+          break;
+      }
+
+      /* make update visible */
+      @send process::MSG_VNCV_PROCESS_UPDATE(link, xp, yp, xp+rw-1, yp+rh-1);
+    }
+
+    return RFBE_NO_ERROR;
+}
+
+RFBError LOCAL DoFramebufferUpdate(RFBlink *link)
+{
+    RFBError err;
+
+    GrSetAreaColorMap(link->RL_frameBitmap, CMT_CLOSEST);
+    GrSetAreaColor(link->RL_frameBitmap, CF_INDEX, 0, 0, 0);
+
+    link->RL_cachedFillColor = 0;
+
+    /* receive data and start drawing */
+    err = ProcessFramebufferUpdate(link);
+
+    /* an update request has been processed */
+    @send process::MSG_VNCV_PROCESS_ACK_UPDATE(link);
+
+    return err;
+}
+
+RFBError LOCAL DoServerCutText(RFBlink *link)
+{
+    rfbServerCutTextMsg cut;
+    byte buf[256],c,cl = 0;
+    dword cutlen;
+    word i,j,amt;
+    optr textObj;
+    VMFileHandle transferFile;
+    VMBlockHandle transferBlock;
+    TransferBlockID transferItem;
+    RFBError err = RFBE_NO_ERROR;
+
+    LOG( LogPrintf("--- Server Cut Text\r\n"); )
+
+    if(ReceiveData(link, ((byte *)&cut)+1, sizeof(cut)-1))
+      return RFBE_COMM_ERROR;
+
+    /*
+     * Create a temporary text object to build CIF_TEXT data block
+     */
+    transferFile = ClipboardGetClipboardFile();
+    textObj = TextAllocClipboardObject(transferFile, 0, 0);
+
+    cutlen = card32(cut.length);
+    while(cutlen > 0)
+    {
+      if(cutlen < sizeof(buf))
+        amt = (word)cutlen;
+      else
+        amt = sizeof(buf);
+
+      if(ReceiveData(link, buf, amt))
+      {
+        err = RFBE_COMM_ERROR;
+        break;
+      }
+
+      /* Convert LF and CR/LF sequences to single CRs only */
+      for(i=j=0; i<amt; i++)
+      {
+        c = buf[i];
+        if(c>=' ' || (c=='\r' && cl!='\n') || (c=='\n' && cl!='\r') || c=='\t')
+        {                               /* skip LF after CR and vice versa */
+          buf[j++] = (c=='\n')? '\r' : c;
+          cl = c;                       /* remember byte before recoding */
+        }
+      }
+
+      /* Convert "Windows" character set to Geos. */
+      LocalCodePageToGeos((char *)buf, j, CODE_PAGE_LATIN_1, '.');
+
+      /* Append text to text object in clipboard */
+      @call textObj::MSG_VIS_TEXT_APPEND_PTR((char *)buf, j);
+
+      cutlen -= amt;
+    }
+
+    /*
+     * Tell the text object that we are done with it. It will destroy
+     * itself after it has converted all its text into a transfer item with
+     * just one format: MANUFACTURER_ID_GEOWORKS::CIF_TEXT. It returns us
+     * the VM block handle of the item.
+     */
+    transferBlock = TextFinishWithClipboardObject(
+      textObj, TCO_RETURN_TRANSFER_ITEM,
+      HandleToOptr(GeodeGetProcessHandle()), "VNC Clipboard");
+
+    transferItem = BlockIDFromFileAndBlock(transferFile, transferBlock);
+
+    /* Register item with the clipboard */
+    ClipboardRegisterItem(transferItem, TIF_NORMAL);
+
+    return err;
+}
+
+word RFBthread(word valuePassed)
+{
+    RFBlink *link;
+    byte msgType;
+    RFBError err;
+    SocketError sockerr;
+    DisplayScheme ds;
+    DisplayClass dc;
+
+    link = MemDeref((MemHandle)valuePassed);
+
+    /* Thread is active */
+    ThreadPSem(link->RL_threadSemaphore);
+
+    /*
+     * Initialize RFB protocol
+     */
+
+    /* exchange version strings */
+    err = NegotiateVersion(link);
+    if(err == RFBE_NO_ERROR)
+    {
+      /* perform authentication if necessary */
+      @send process::MSG_VNCV_PROCESS_UPDATE_STATUS(RFBS_AUTHENTICATING);
+      err = Authenticate(link, link->RL_password);
+      if(err == RFBE_NO_ERROR)
+      {
+        /* negotiate desktop format, pixel format, and encodings */
+        @send process::MSG_VNCV_PROCESS_UPDATE_STATUS(RFBS_NEGOTIATING);
+        err = NegotiateParameters(link);
+      }
+    }
+
+    if(err != RFBE_NO_ERROR)           /* error in protocol initialization */
+      goto initError;
+
+    @call application::MSG_GEN_APPLICATION_GET_DISPLAY_SCHEME(&ds);
+    dc = (ds.DS_displayType & DT_DISP_CLASS) >> DT_DISP_CLASS_OFFSET;
+    switch(dc)
+    {
+      case DC_GRAY_1:  
+      case DC_COLOR_4: link->RL_bmFormat = BMF_4BIT; break;
+      default:         link->RL_bmFormat = BMF_8BIT;
+    }
+
+    err = RFBE_CANNOT_CREATE_BITMAP;
+
+    /* create temporary file and initialize off-screen bitmap */
+
+    FileSetStandardPath(SP_WASTE_BASKET);
+    link->RL_frameFile = VMOpen("VNC Frame", VMAF_FORCE_READ_WRITE,
+      VMO_CREATE_TRUNCATE, 0);          /* create temporary file for objects */
+
+    if(!link->RL_frameFile) goto fileError;
+
+    link->RL_frameBlock = GrCreateBitmap(
+      link->RL_bmFormat, link->RL_screenWidth, link->RL_screenHeight,
+      link->RL_frameFile, 0, &(link->RL_frameBitmap));
+
+    if(!link->RL_frameBlock || !link->RL_frameBitmap) goto bmpError;
+
+    GrCreatePalette(link->RL_frameBitmap);
+
+    /* notify process that we are connected */
+    link->RL_open = TRUE;               /* process may send event messages */
+    @send process::MSG_VNCV_PROCESS_RFB_THREAD_CONNECTED(link);
+
+    /*
+     * Main protocol loop
+     */
+
+    while(!link->RL_abort)
+    {
+      sockerr = ReceiveData(link, &msgType, sizeof(byte));
+
+      if(sockerr == SE_NORMAL)
+        switch(msgType)
+        {
+          case rfbFramebufferUpdate:
+            @send process::MSG_VNCV_PROCESS_UPDATE_STATUS(RFBS_UPDATING);
+            DoFramebufferUpdate(link);
+            @send process::MSG_VNCV_PROCESS_UPDATE_STATUS(RFBS_NONE);
+            break;
+          case rfbBell:
+            UserStandardSound(SST_NOTIFY);
+            break;
+          case rfbServerCutText:
+            @send process::MSG_VNCV_PROCESS_UPDATE_STATUS(RFBS_CLIPBOARD_SYNC);
+            DoServerCutText(link);
+            @send process::MSG_VNCV_PROCESS_UPDATE_STATUS(RFBS_NONE);
+            break;
+        }
+    }
+
+    /*
+     * Shut down RFB protocol
+     */
+
+    /* no more updates (synchronize with MSG_META_EXPOSED) */
+    HandleP(link->RL_memHandle);
+
+    link->RL_open = FALSE;              /* stop sending event messages */
+
+    GrDestroyBitmap(link->RL_frameBitmap, BMD_KILL_DATA);
+    link->RL_frameBlock = 0;            /* destroy off-screen buffer */
+
+    HandleV(link->RL_memHandle);
+
+bmpError:
+    VMClose(link->RL_frameFile, FILE_NO_ERRORS);
+    FileSetStandardPath(SP_WASTE_BASKET);
+    FileDelete("VNC Frame");
+
+fileError:
+    err = RFBE_NO_ERROR;                /* connection was ended regularly */
+
+initError:
+    @send process::MSG_VNCV_PROCESS_UPDATE_STATUS(RFBS_CLOSING);
+    CloseSocket(link);
+    @send process::MSG_VNCV_PROCESS_UPDATE_STATUS(RFBS_NONE);
+
+    @send process::MSG_VNCV_PROCESS_RFB_THREAD_ENDED(link, err);
+
+    /* Thread has been shut down (most importantly, the bitmap was destroyed) */
+    ThreadVSem(link->RL_threadSemaphore);
+
+    return 0;
+}

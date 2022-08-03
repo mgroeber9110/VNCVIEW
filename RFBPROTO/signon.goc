@@ -1,0 +1,222 @@
+/*
+ *      Signon.goc
+ *
+ *      by Marcus Groeber
+ */
+
+@include <stdapp.goh>
+@include <socket.goh>
+#include <sockmisc.h>
+#include <sem.h>
+
+#include <ansi/stdio.h>
+#include <ansi/string.h>
+
+@include "fixes.goh"
+@include "vncview.goh"
+#include "d3des.h"
+
+
+/**************************************************************************
+ *        Negotiate RFB connection to specified server
+ **************************************************************************/
+
+RFBError NegotiateVersion(RFBlink *link)
+{
+   rfbProtocolVersionMsg buf, expected;
+
+   sprintf(expected, rfbProtocolVersionFormat,
+     rfbProtocolMajorVersion, rfbProtocolMinorVersion);
+
+   /* get and check ProtocolVersion message from server */
+   if(ReceiveData(link, (byte *)buf, sz_rfbProtocolVersionMsg))
+     return RFBE_COMM_ERROR;
+   if(memcmp(buf, expected, sz_rfbProtocolVersionMsg))
+     return RFBE_UNSUPPORTED_PROTOCOL;
+
+   /* send our own ProtocolVersion message */
+   if(SendData(link, (byte *)expected, sz_rfbProtocolVersionMsg))
+     return RFBE_COMM_ERROR;
+
+   return RFBE_NO_ERROR;
+}
+
+/*
+ *   The following function has been taken straight from the Win95/NT client
+ */
+void LOCAL vncEncryptBytes(unsigned char *bytes, char *passwd)
+{
+    unsigned char key[8];
+    unsigned int i;
+
+    /* key is simply password padded with nulls */
+
+    for (i = 0; i < 8; i++) {
+	if (i < strlen(passwd)) {
+	    key[i] = passwd[i];
+	} else {
+	    key[i] = 0;
+	}
+    }
+
+    deskey(key, EN0);
+
+    for (i = 0; i < CHALLENGESIZE; i += 8) {
+	des(bytes+i, bytes+i);
+    }
+}
+
+RFBError Authenticate(RFBlink *link, char *password)
+{
+   dword authScheme, authStatus;
+   byte challenge[CHALLENGESIZE];
+
+   /* get and handle authentication scheme from server */
+   if(ReceiveData(link, &authScheme, sizeof(dword)))
+     return RFBE_COMM_ERROR;
+
+   switch( card32(authScheme) )
+   {
+     case rfbConnFailed:
+       return RFBE_CONNECTION_FAILED;
+
+     case rfbNoAuth:
+       break;
+
+     case rfbVncAuth:
+       if(ReceiveData(link, challenge, CHALLENGESIZE))
+         return RFBE_COMM_ERROR;
+
+       /* generate response from challenge by encoding it */
+       vncEncryptBytes(challenge, password);
+
+       if(SendData(link, challenge, CHALLENGESIZE))
+         return RFBE_COMM_ERROR;
+       if(ReceiveData(link, &authStatus, sizeof(dword)))
+         return RFBE_COMM_ERROR;
+
+       switch( card32(authStatus) )
+       {
+         case rfbVncAuthOK:
+           break;
+         case rfbVncAuthFailed:
+           return RFBE_AUTHENTICATION_FAILED;
+         case rfbVncAuthTooMany:
+           return RFBE_AUTHENTICATION_FAILED;
+       }
+       break;
+
+     default:
+       return RFBE_AUTHENTICATION_FAILED;
+   }
+
+   return RFBE_NO_ERROR;
+}
+
+RFBError NegotiateParameters(RFBlink *link)
+{
+   rfbServerInitMsg serverInit;
+   dword nameLen;
+   byte name[256];                      
+   byte sharedFlag = 1;                 /* always request shared desktop */
+
+   struct {
+     rfbSetEncodingsMsg encMsg;
+     CARD32 encodingType[5];
+   } setEncodings = {
+     {rfbSetEncodings, 0, card16(5)},
+      card32(rfbEncodingHextile),
+      card32(rfbEncodingCopyRect),
+      card32(rfbEncodingRaw),
+      card32(rfbEncodingRRE),
+      card32(rfbEncodingCoRRE)};
+
+   rfbSetPixelFormatMsg setPixelFormat = {
+     rfbSetPixelFormat, 0,0,
+     {8, 8, 0, 1, card16(7), card16(7), card16(3), 0, 3, 6}};
+
+
+   /* Send ClientInitialization message */
+   if(SendData(link, &sharedFlag, sizeof(byte)))
+     return RFBE_COMM_ERROR;
+
+   /* Get fixed part of ServerInitialization message */
+   if(ReceiveData(link, &serverInit, sizeof(serverInit)))
+     return RFBE_COMM_ERROR;
+
+   link->RL_screenWidth = card16(serverInit.framebufferWidth);
+   link->RL_screenHeight = card16(serverInit.framebufferHeight);
+
+   /* Get desktop name - should check for buffer overrun! */
+   nameLen = card32(serverInit.nameLength);
+   if(ReceiveData(link, name, nameLen))
+     return RFBE_COMM_ERROR;
+   name[nameLen] = 0;
+
+   /* Send SetEncodings message - some encodings may depend on bufferring */
+   if(SendData(link, &setEncodings, sizeof(setEncodings)))
+     return RFBE_COMM_ERROR;
+
+   /* Send SetPixelFormat message */
+   if(SendData(link, &setPixelFormat, sizeof(setPixelFormat)))
+     return RFBE_COMM_ERROR;
+
+   return RFBE_NO_ERROR;
+}
+
+/**************************************************************************
+ *        Connect to specified server
+ **************************************************************************/
+
+word RFBthread(word valuePassed);       /* valuePassed is RFBlink mem handle */
+
+RFBError RFBConnect(char *host, word display, char *pwd, word accPnt,
+  RFBlink **link)
+{
+   MemHandle mh;
+   RFBlink *l;
+   RFBError err;
+   static word (*threadRoutine)(word valuePassed) = RFBthread;
+
+   mh = MemAlloc(sizeof(RFBlink), HF_FIXED, HAF_ZERO_INIT);
+   l = MemDeref(mh);
+   l->RL_memHandle = mh;                /* self-reference */
+
+   /* establish TCP connection to specified host */
+   @call process::MSG_VNCV_PROCESS_UPDATE_STATUS(RFBS_CONNECTING);
+   err = OpenSocket(l, host, display, accPnt);
+                                        /* attempt to connect to host */
+
+   if(err == RFBE_NO_ERROR)             /* no failure? spawn work thread */
+   {
+     *link = l;
+
+     strncpy(l->RL_password, pwd, sizeof(l->RL_password)-1);
+     l->RL_password[sizeof(l->RL_password)-1] = 0;
+
+     /* spawn thread to handle incoming data */
+     l->RL_abort = FALSE;
+     l->RL_threadSemaphore = ThreadAllocSem(1);
+
+     ThreadCreate(PRIORITY_STANDARD, (word)(l->RL_memHandle), threadRoutine,
+       2048, GeodeGetProcessHandle());
+   }
+   else
+     MemFree(mh);                       /* release link descriptor and exit */
+
+   return err;
+}
+
+/**************************************************************************
+ *        Close specified RFB connection
+ **************************************************************************/
+
+void RFBDisconnect(RFBlink *link)
+{
+   link->RL_abort = TRUE;               /* make thread abort if it is running */
+
+#ifndef NOSOCKET
+   if(link->RL_socket)
+     SocketInterrupt(link->RL_socket);  /* abort any running operation */
+#endif
+}

@@ -1,0 +1,247 @@
+/*
+ *      RFBmisc.goc
+ *
+ *      by Marcus Groeber
+ */
+
+@include <stdapp.goh>
+@include <socket.goh>
+#include <sockmisc.h>
+
+#include <ansi/string.h>
+#include <ansi/stdio.h>
+#include <ansi/stdlib.h>
+
+@include "vncview.goh"
+
+
+#ifdef LOGGING
+void LogPrintf(char *fmt, ...)
+{
+     char buf[512];
+     va_list arg;
+     static FileHandle file = NullHandle ;
+
+     if(!fmt)
+     {
+         if(file) FileClose(file, TRUE);
+         file = NullHandle;
+         return;
+     }
+
+     if (!file)  {
+         FilePushDir();
+         FileSetStandardPath(SP_DOCUMENT) ;
+         file = FileCreate("rfb.log",
+                            FILE_CREATE_TRUNCATE | FCF_NATIVE |
+                            FILE_ACCESS_W | FILE_DENY_RW, 0 );
+         FilePopDir() ;
+     }
+
+     if (file)  {
+         va_start(arg, fmt);
+         vsprintf(buf, fmt, arg);
+         va_end(arg);
+         FileWrite(file, buf, strlen(buf), FALSE);
+     }
+}
+#endif
+
+
+/**************************************************************************
+ *        Some types to make handling TCP/IP addresses more convenient
+ **************************************************************************/
+
+typedef struct {
+     TcpAccPntExtendedAddress UTA_link;
+     TCHAR                    UTA_ip[MAX_IP_ADDR_STRING_LENGTH];
+} UnresolvedTCPAddress;
+
+typedef struct {
+     SocketAddress            RTA_sock;
+     TcpAccPntResolvedAddress RTA_addr;
+} ResolvedTCPAddress;
+
+
+/*
+ * Low-level opening of link
+ */
+RFBError OpenSocket(RFBlink *link, char *host, word display, word accPnt)
+{
+#ifndef NOSOCKET
+   SocketError err;
+   UnresolvedTCPAddress hostname;
+   ResolvedTCPAddress hostaddr = {{{0,MANUFACTURER_ID_SOCKET_16BIT_PORT},
+                                    sizeof(RFB_DOMAIN)-1,RFB_DOMAIN,
+                                    0}};
+#endif
+
+   if(host==NULL)                       /* run playback from file? */
+   {
+     FilePushDir();
+     FileSetStandardPath(SP_DOCUMENT) ;
+     link->RL_playbackFile = FileOpen("RFB Recorded Session",
+                                      FILE_ACCESS_R | FILE_DENY_NONE);
+     FilePopDir() ;
+     link->RL_socket = NullHandle;
+     return (link->RL_playbackFile)? RFBE_NO_ERROR : RFBE_CANNOT_CONNECT;
+   }
+
+#ifndef NOSOCKET
+   /* store link info into raw address buffer */
+   hostname.UTA_link.TAPEA_linkSize =
+     sizeof(hostname.UTA_link.TAPEA_linkType) +
+     sizeof(hostname.UTA_link.TAPEA_accPntID);
+
+   hostname.UTA_link.TAPEA_linkType = LT_ID;
+   hostname.UTA_link.TAPEA_accPntID = accPnt;
+
+   strncpy(hostname.UTA_ip, host, MAX_IP_ADDR_STRING_LENGTH-1);
+   hostname.UTA_ip[MAX_IP_ADDR_STRING_LENGTH-1] = 0;
+
+   hostaddr.RTA_sock.SA_addressSize = SocketResolve(
+     RFB_DOMAIN,
+     &hostname, sizeof(hostname.UTA_link)+strlen(hostname.UTA_ip),
+     &hostaddr.RTA_addr, sizeof(hostaddr.RTA_addr));
+
+   if(!hostaddr.RTA_sock.SA_addressSize)
+     return RFBE_CANNOT_RESOLVE;
+
+   /* add port to resolved host address */
+   hostaddr.RTA_sock.SA_port.SP_port = RFB_BASE_PORT + display;
+
+   /* create socket, increase receive buffer size to take better advantage of
+      sliding windows, and attempt to connect to the host */
+   link->RL_socket = SocketCreate(SDT_STREAM);
+   SocketSetIntSocketOption(link->RL_socket, SO_RECV_BUF, 8192);
+   err = SocketConnect(link->RL_socket, &hostaddr, RFB_CONNECT_TIMEOUT);
+
+   if(err != SE_NORMAL)
+   {
+     SocketClose(link->RL_socket);
+     return RFBE_CANNOT_CONNECT;
+   }
+
+   link->RL_readBufPtr = link->RL_readBufTop = 0;
+                                        /* nothing read from socket yet */
+
+   FilePushDir();
+   FileSetStandardPath(SP_DOCUMENT) ;
+   link->RL_playbackFile = FileCreate("RFB Recorded Session",
+                                      FILE_CREATE_TRUNCATE |
+                                      FILE_ACCESS_W | FILE_DENY_RW, 0 );
+   FilePopDir() ;
+
+   return RFBE_NO_ERROR;
+#else
+   return RFBE_CANNOT_CONNECT;
+#endif
+}
+
+void CloseSocket(RFBlink *link)
+{
+#ifndef NOSOCKET
+   if(link->RL_socket)                  /* close connection to host, if any */
+     SocketClose(link->RL_socket);
+#endif
+   if(link->RL_playbackFile)            /* close playback file, if any */
+     FileClose(link->RL_playbackFile, 0);
+}
+
+SocketError SendFramebufferUpdateRequest(RFBlink *link, Boolean incremental,
+  word xpos, word ypos, word width, word height)
+{
+    rfbFramebufferUpdateRequestMsg msg;
+
+    msg.type = rfbFramebufferUpdateRequest;
+    msg.incremental = incremental? 1 : 0;
+    msg.x = card16(xpos);
+    msg.y = card16(ypos);
+    msg.w = card16(width);
+    msg.h = card16(height);
+
+    return SendData(link, &msg, sizeof(msg));
+}
+
+SocketError SendMouseEvent(RFBlink *link, word xpos, word ypos, word inputState)
+{
+    rfbPointerEventMsg msg;
+
+    msg.type = rfbPointerEvent;
+    msg.buttonMask = ((inputState & BI_B0_DOWN)? rfbButton1Mask : 0) |
+                     ((inputState & BI_B1_DOWN)? rfbButton2Mask : 0) |
+                     ((inputState & BI_B2_DOWN)? rfbButton3Mask : 0);
+    msg.x = card16(xpos);
+    msg.y = card16(ypos);
+
+    return SendData(link, &msg, sizeof(msg));
+}
+
+SocketError SendKeyEvent(RFBlink *link, dword key, Boolean downFlag)
+{
+    rfbKeyEventMsg msg;
+
+    msg.type = rfbKeyEvent;
+    msg.down = downFlag? 1:0;
+    msg.pad = 0;
+    msg.key = card32(key);
+
+    return SendData(link, &msg, sizeof(msg));
+}
+
+struct {
+  byte geosKey;
+  word RFBKey;
+} keymap[] = {
+  VC_BACKSPACE, XK_BackSpace,
+  VC_TAB,       XK_Tab,
+  VC_ENTER,     XK_Return,
+  VC_ESCAPE,    XK_Escape,
+  VC_INS,       XK_Insert,
+  VC_DEL,       XK_Delete,
+  VC_HOME,      XK_Home,
+  VC_END,       XK_End,
+  VC_PREVIOUS,  XK_Page_Up,
+  VC_NEXT,      XK_Page_Down,
+  VC_LEFT,      XK_Left,
+  VC_UP,        XK_Up,
+  VC_RIGHT,     XK_Right,
+  VC_DOWN,      XK_Down,
+  VC_F1,        XK_F1,
+  VC_F2,        XK_F2,
+  VC_F3,        XK_F3,
+  VC_F4,        XK_F4,
+  VC_F5,        XK_F5,
+  VC_F6,        XK_F6,
+  VC_F7,        XK_F7,
+  VC_F8,        XK_F8,
+  VC_F9,        XK_F9,
+  VC_F10,       XK_F10,
+  VC_F11,       XK_F11,
+  VC_F12,       XK_F12,
+  VC_LSHIFT,    XK_Shift_L,
+  VC_RSHIFT,    XK_Shift_L,
+  VC_LCTRL,     XK_Control_L,
+  VC_RCTRL,     XK_Control_L,
+  VC_LALT,      XK_Alt_L,
+  VC_RALT,      XK_Alt_L,
+};
+
+word MapKey(word key)
+{
+    word i;
+
+    if((key>>8) == CS_BSW)
+    {                                   
+      return (key & 0xFF);              /* just pass on ordinary keys */
+    }
+    else if((key>>8) == CS_CONTROL)
+    {
+      for(i=0; i<sizeof(keymap)/sizeof(keymap[0]); i++)
+        if((byte)key == keymap[i].geosKey)
+          return keymap[i].RFBKey;      /* translate control keys by map */
+    }
+
+    return 0;                           /* unknown, captain */
+}
+

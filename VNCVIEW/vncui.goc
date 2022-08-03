@@ -1,0 +1,603 @@
+/*
+ *      vncui.goc
+ *
+ *      by Marcus Groeber
+ */
+
+@include <stdapp.goh>
+@include <foam.goh>           /* only required if NOKIA is defined */
+@include <accpnt.goh>
+#include <sockmisc.h>
+
+@include "vncview.goh"
+
+
+@start    AppResource;
+
+@ifdef NOKIA
+ @object FoamSubApplicationClass VNCViewApp = {
+@else
+ @object GenApplicationClass VNCViewApp = {
+@endif
+
+    GI_visMoniker = list { @VNCViewTextMoniker,
+@ifdef NOKIA
+                           @NokiaListMoniker, @NokiaStatusMoniker
+@else
+                           @VGA16Large, @DesktopNDMoniker, @DesktopNDBWMoniker
+@endif
+                         };
+    GI_comp = @VNCViewPrimary;
+
+    gcnList(MANUFACTURER_ID_GEOWORKS,GAGCNLT_WINDOWS) = @VNCViewPrimary;
+
+    ATTR_GEN_HELP_FILE = "VNCView";
+    ATTR_GEN_INIT_FILE_CATEGORY = "VNCView";
+    ATTR_GEN_INIT_FILE_PROPAGATE_TO_CHILDREN;
+
+@ifdef NOKIA
+    FSAI_launcherApp = FA_SERVICES_APP;
+    HINT_APPLICATION_QUIT_ON_IACP_ALLOW_FILE_ACCESS;
+@endif
+}
+
+@ifdef NOKIA
+  @visMoniker VNCViewTextMoniker = "VNC\rViewer";
+@else
+  @visMoniker VNCViewTextMoniker = "VNC Viewer";
+@endif
+
+@ifdef NOKIA
+@include "art/mkrNokiaStatus.goh"
+@include "art/mkrNokiaList.goh"
+@else
+@include "art/desktop.goh"
+@include "art/mkrDesktopND.goh"
+@include "art/mkrDesktopNDBW.goh"
+@endif
+
+@end	AppResource;
+
+
+@start    Interface;          /* this resource is for misc UI objects */
+
+@object GenPrimaryClass VNCViewPrimary  = {
+    GI_comp = @LogOnDialog, @SendKeyDialog,
+@ifdef NOKIA
+              @ButtonLevel1, @ButtonLevel2, @ButtonLevel3,
+@else
+              @LogOffTrig,
+@endif
+              @VNCViewView, @StatusLine;
+
+    ATTR_GEN_HELP_CONTEXT = "TOC";
+    ATTR_GEN_INIT_FILE_PROPAGATE_TO_CHILDREN;
+    HINT_ORIENT_CHILDREN_VERTICALLY;
+@ifdef NOKIA
+    HINT_POSITION_WINDOW_AT_RATIO_OF_PARENT = {0, 0};
+@else
+    HINT_PRIMARY_NO_FILE_MENU;
+@endif
+}
+
+/***********************************************************************
+ *        Connect Dialog Box
+ ***********************************************************************/
+
+@object GenInteractionClass LogOnDialog = {
+    GII_visibility = GIV_DIALOG;
+    GII_attrs = @default | GIA_MODAL | GIA_NOT_USER_INITIATABLE;
+@ifdef NOKIA
+    GII_type = GIT_PROPERTIES;
+    GI_comp = @LogOnGroup;
+@else
+    GI_visMoniker = "VNC Connect";
+    GII_type = GIT_COMMAND;
+    GI_comp = @ServerName, @DisplayNumber, @Password, @LogonFlags,
+              @LogonCommand,
+@ifdef ENABLE_RECORD_REPLAY
+              @ReplayTrigger,
+@endif
+              @CloseTrigger;
+    HINT_CENTER_CHILDREN_ON_MONIKERS;
+@endif
+    ATTR_GEN_HELP_CONTEXT = "Connect";
+    ATTR_GEN_INIT_FILE_PROPAGATE_TO_CHILDREN;
+    HINT_DISMISS_WHEN_DISABLED;
+}
+
+@ifdef NOKIA
+@object ComplexMonikerClass LogOnGroup = {
+   ComplexMoniker = GenInteractionClass;
+   CMI_topText = CMT_CONNECT;
+   CMI_iconBitmap = CMB_PC_ICON;
+   GI_comp =
+@ifndef NOSOCKET
+             @AccessPoint,
+@endif
+             @ServerName, @DisplayNumber, @Password, @LogonFlags,
+
+             @LogonCommand,     /* Slot 1 */
+@ifdef ENABLE_RECORD_REPLAY
+             @ReplayTrigger,    /* Slot 2 */
+@endif
+             @CloseTrigger;     /* Slot 3 */
+
+   ATTR_COMPLEX_MONIKER_PLACE_BITMAP_AT_LEFT;
+   HINT_DRAW_IN_BOX;
+   HINT_DRAW_SHADOW;
+   HINT_PLACE_MONIKER_ABOVE;
+   HINT_PLACE_MONIKER_TO_LEFT;
+   HINT_EXPAND_WIDTH_TO_FIT_PARENT;
+   HINT_EXPAND_HEIGHT_TO_FIT_PARENT;
+   HINT_COMPLEX_MONIKER_DRAW_SEPARATOR;
+   HINT_CENTER_CHILDREN_ON_MONIKERS;
+   HINT_INDENT_CHILDREN = 0;
+   ATTR_GEN_INIT_FILE_PROPAGATE_TO_CHILDREN;
+}
+@endif
+
+@if (!defined(NOSOCKET)) && defined(NOKIA)
+ @chunk char accpntMkr[] = "Access Point List";
+
+ @object AccessPointControlClass AccessPoint = {
+    GI_visMoniker = "Access Point";
+    GI_states = GS_USABLE|GS_ENABLED;
+    ATTR_ACCESS_POINT_CONTROL_LIST_MONIKER = @accpntMkr;
+    ATTR_GEN_INIT_FILE_KEY = "accessPoint";
+    HINT_ACCESS_POINT_CONTROL_MINIMIZE_SIZE;
+ }
+@endif
+
+@ifdef NOKIA
+  @object UnderlinedGenTextClass ServerName = {
+    GI_visMoniker = "Server Name:";
+@else
+  @object GenTextClass ServerName = {
+    GI_visMoniker = 'S',"Server Name:";
+@endif
+    GTXI_maxLength = MAX_IP_ADDR_STRING_LENGTH;
+    GTXI_destination = process;
+
+    ATTR_GEN_INIT_FILE_KEY = "serverName";
+    ATTR_GEN_TEXT_NEVER_MAKE_SCROLLABLE;
+    HINT_TEXT_CURSOR_AT_END;
+    HINT_TEXT_UNDERLINE;
+    HINT_ALIGN_WITH_CENTERED_MONIKERS;
+    HINT_MINIMUM_SIZE = {0, SST_LINES_OF_TEXT | 1, 0};
+    HINT_INITIAL_SIZE = {0, SST_LINES_OF_TEXT | 1, 0};
+ }
+
+@ifdef NOKIA
+  @object UnderlinedGenTextClass DisplayNumber = {
+    GI_visMoniker = "Display:";
+@else
+  @object GenTextClass DisplayNumber = {
+    GI_visMoniker = 'D',"Display:";
+@endif
+    GTXI_maxLength = VNCVIEW_DISPLAY_LENGTH;
+    GTXI_destination = process;
+
+    ATTR_GEN_INIT_FILE_KEY = "displayNumber";
+    ATTR_GEN_TEXT_NUMERIC;
+    ATTR_GEN_TEXT_NEVER_MAKE_SCROLLABLE;
+    HINT_TEXT_CURSOR_AT_END;
+    HINT_TEXT_UNDERLINE;
+    HINT_ALIGN_WITH_CENTERED_MONIKERS;
+    HINT_FIXED_SIZE = {SST_WIDE_CHAR_WIDTHS | VNCVIEW_DISPLAY_LENGTH,
+                       SST_LINES_OF_TEXT | 1, 0};
+ }
+
+@ifdef NOKIA
+  @object UnderlinedGenTextClass Password = {
+    GI_visMoniker = "Password:";
+@else
+  @object GenTextClass Password = {
+    GI_visMoniker = 'P',"Password:";
+@endif
+    GTXI_maxLength = VNCVIEW_PASSWORD_LENGTH;
+
+    HINT_ALIGN_WITH_CENTERED_MONIKERS;
+    ATTR_GEN_TEXT_NEVER_MAKE_SCROLLABLE;
+    ATTR_GEN_TEXT_CHAR_ATTR = @PasswordFont ;
+    HINT_TEXT_CURSOR_AT_END;
+    HINT_MAXIMUM_SIZE = {SST_WIDE_CHAR_WIDTHS | VNCVIEW_PASSWORD_LENGTH,
+                         SST_LINES_OF_TEXT | 1, 0};
+    HINT_TEXT_UNDERLINE;
+  }
+
+@chunk VisTextCharAttr PasswordFont = CHAR_ATTR_FONT_SIZE(FID_BISON, 13) ;
+
+@object GenBooleanGroupClass LogonFlags = {
+    GBGI_selectedBooleans = 0;
+@ifdef ENABLE_RECORD_REPLAY
+    GI_comp = @LogonFlagRecord;
+@endif
+    ATTR_GEN_INIT_FILE_KEY = "logonFlags";
+@ifdef NOKIA
+    HINT_CENTER_CHILDREN_ON_MONIKERS;
+@endif
+}
+
+@ifdef ENABLE_RECORD_REPLAY
+@object GenBooleanClass LogonFlagRecord = {
+@ifdef NOKIA
+    GI_visMoniker = "Record session";
+@else
+    GI_visMoniker = 'R',"Record session";
+@endif
+    GBI_identifier = VNCVIEW_RECORD;
+}
+@endif
+
+@object GenTriggerClass LogonCommand = {
+@ifdef NOKIA
+    GI_visMoniker = "Attach";
+@else
+    GI_visMoniker = 'A',"Attach";
+@endif
+    GI_attrs = @default | GA_SIGNAL_INTERACTION_COMPLETE;
+    GTI_actionMsg = MSG_VNCV_PROCESS_LOGON;
+    GTI_destination = process;
+@ifdef NOKIA
+    HINT_SEEK_MENU_BAR;
+    HINT_SEEK_SLOT = 1;
+@else
+    HINT_SEEK_REPLY_BAR;
+    HINT_DEFAULT_DEFAULT_ACTION;
+@endif
+};
+
+@ifdef ENABLE_RECORD_REPLAY
+@object GenTriggerClass ReplayTrigger = {
+@ifdef NOKIA
+    GI_visMoniker = "Replay";
+@else
+    GI_visMoniker = 'R',"Replay";
+@endif
+    GI_attrs = @default | GA_SIGNAL_INTERACTION_COMPLETE;
+    GTI_actionMsg = MSG_VNCV_PROCESS_REPLAY;
+    GTI_destination = process;
+@ifdef NOKIA
+    HINT_SEEK_MENU_BAR;
+    HINT_SEEK_SLOT = 2;
+@else
+    HINT_SEEK_REPLY_BAR;
+@endif
+};
+@endif
+
+@ifdef NOKIA
+  @object ComplexMonikerClass CloseTrigger = {
+    ComplexMoniker = GenTriggerClass;
+    CMI_topText = CMT_CLOSE;
+    GTI_actionMsg = MSG_FSA_RETURN_TO_LAUNCHER;
+    GTI_destination = @VNCViewApp;
+
+    HINT_SEEK_MENU_BAR;
+    HINT_SEEK_SLOT = 3;
+  }
+@else
+  @object GenTriggerClass CloseTrigger = {
+    GI_visMoniker = 'E',"Exit";
+    GI_attrs = @default | GA_SIGNAL_INTERACTION_COMPLETE;
+    GTI_actionMsg = MSG_META_QUIT;
+    GTI_destination = @VNCViewApp;
+    HINT_SEEK_REPLY_BAR;
+    ATTR_GEN_TRIGGER_INTERACTION_COMMAND = IC_DISMISS;
+  }
+@endif
+
+
+/***********************************************************************
+ *        Send Key Dialog Box
+ ***********************************************************************/
+
+@object GenInteractionClass SendKeyDialog = {
+    GI_visMoniker = "Keys";
+    GII_type = GIT_COMMAND;
+@ifdef NOKIA
+    GI_comp = @SendKeyGroup;
+    GII_visibility = GIV_POPUP;
+    GII_attrs = @default | GIA_NOT_USER_INITIATABLE;
+@else
+    GI_comp = @KeyModifiersGroup, @KeySpecialGroup, @KeyASCII, @KeySend;
+    GII_visibility = GIV_DIALOG;
+
+    ATTR_GEN_HELP_CONTEXT = "Keys";
+    HINT_ORIENT_CHILDREN_VERTICALLY;
+    HINT_CENTER_CHILDREN_ON_MONIKERS;
+    HINT_SEEK_SLOT = 1;
+@endif
+    HINT_SEEK_MENU_BAR;
+};
+
+@ifdef NOKIA
+@object ComplexMonikerClass SendKeyGroup = {
+   ComplexMoniker = GenInteractionClass;
+   CMI_topText = CMT_SPECIAL_KEYS;
+   GI_comp = @KeyModifiers, @KeySpecialGroup, @KeyASCII, @KeyChange, @KeySend;
+
+   ATTR_COMPLEX_MONIKER_PLACE_BITMAP_AT_LEFT;
+   HINT_PLACE_MONIKER_ABOVE;
+   HINT_PLACE_MONIKER_TO_LEFT;
+   HINT_EXPAND_WIDTH_TO_FIT_PARENT;
+   HINT_EXPAND_HEIGHT_TO_FIT_PARENT;
+   HINT_COMPLEX_MONIKER_DRAW_SEPARATOR;
+   HINT_CENTER_CHILDREN_ON_MONIKERS;
+   HINT_INDENT_CHILDREN = 0;
+}
+@endif
+
+@ifndef NOKIA
+@object GenInteractionClass KeyModifiersGroup = {
+    GI_visMoniker = "Modifiers:";
+    GI_comp = @KeyModifiers;
+}
+@endif
+
+@object GenBooleanGroupClass KeyModifiers = {
+    GBGI_selectedBooleans = 0;
+    GI_comp = @KeyModShift, @KeyModCtrl, @KeyModAlt /*, @KeyModMeta */;
+    HINT_ORIENT_CHILDREN_VERTICALLY;
+@ifdef NOKIA
+    HINT_CENTER_CHILDREN_ON_MONIKERS;
+@endif
+}
+
+  @object GenBooleanClass KeyModShift = {
+      GI_visMoniker = "Shift";
+      GBI_identifier = KEY_SHIFT;
+  }
+  @object GenBooleanClass KeyModCtrl = {
+      GI_visMoniker = "Ctrl";
+      GBI_identifier = KEY_CTRL;
+  }
+  @object GenBooleanClass KeyModAlt = {
+      GI_visMoniker = "Alt";
+      GBI_identifier = KEY_ALT;
+  }
+//@object GenBooleanClass KeyModMeta = {
+//    GI_visMoniker = "Meta";
+//    GBI_identifier = KEY_META;
+//}
+
+@object GenInteractionClass KeySpecialGroup = {
+@ifdef NOKIA
+    GI_visMoniker = "Key";
+@else
+    GI_visMoniker = "Key:";
+@endif
+    GI_comp = @KeySpecial;
+}
+
+@object GenItemGroupClass KeySpecial = {
+    GI_comp = @KeySpecASCII, @KeySpecF1, @KeySpecF2, @KeySpecF3, @KeySpecF4,
+              @KeySpecF5, @KeySpecF6, @KeySpecF7, @KeySpecF8, @KeySpecF9,
+              @KeySpecF10, @KeySpecF11, @KeySpecF12, @KeySpecBackSpace,
+              @KeySpecTab, @KeySpecReturn, @KeySpecEscape, @KeySpecInsert,
+              @KeySpecDelete, @KeySpecHome, @KeySpecEnd, @KeySpecPageUp,
+              @KeySpecPageDown, @KeySpecLeft, @KeySpecUp, @KeySpecRight,
+              @KeySpecDown;
+
+    GIGI_selection = 0;
+    GIGI_destination = process;
+    ATTR_GEN_ITEM_GROUP_STATUS_MSG = MSG_VNCV_PROCESS_KEY_CHANGED;
+    HINT_ITEM_GROUP_MINIMIZE_SIZE;
+    HINT_ITEM_GROUP_DISPLAY_CURRENT_SELECTION;
+@ifdef NOKIA
+    HINT_ITEM_GROUP_SCROLLABLE;
+@endif
+    HINT_EXPAND_WIDTH_TO_FIT_PARENT;
+    HINT_EXPAND_HEIGHT_TO_FIT_PARENT;
+};
+
+  @define KEYSPEC(obj, moniker, id) \
+    @object GenItemClass obj = { \
+        GI_visMoniker = moniker; \
+        GII_identifier = id; \
+    }
+
+  @KEYSPEC(KeySpecASCII,        "(ASCII)",      0);
+  @KEYSPEC(KeySpecF1,           "F1",           XK_F1);
+  @KEYSPEC(KeySpecF2,           "F2",           XK_F2);
+  @KEYSPEC(KeySpecF3,           "F3",           XK_F3);
+  @KEYSPEC(KeySpecF4,           "F4",           XK_F4);
+  @KEYSPEC(KeySpecF5,           "F5",           XK_F5);
+  @KEYSPEC(KeySpecF6,           "F6",           XK_F6);
+  @KEYSPEC(KeySpecF7,           "F7",           XK_F7);
+  @KEYSPEC(KeySpecF8,           "F8",           XK_F8);
+  @KEYSPEC(KeySpecF9,           "F9",           XK_F9);
+  @KEYSPEC(KeySpecF10,          "F10",          XK_F10);
+  @KEYSPEC(KeySpecF11,          "F11",          XK_F11);
+  @KEYSPEC(KeySpecF12,          "F12",          XK_F12);
+  @KEYSPEC(KeySpecBackSpace,    "BackSpace",    XK_BackSpace);
+  @KEYSPEC(KeySpecTab,          "Tab",          XK_Tab);
+  @KEYSPEC(KeySpecReturn,       "Return",       XK_Return);
+  @KEYSPEC(KeySpecEscape,       "Escape",       XK_Escape);
+  @KEYSPEC(KeySpecInsert,       "Insert",       XK_Insert);
+  @KEYSPEC(KeySpecDelete,       "Delete",       XK_Delete);
+  @KEYSPEC(KeySpecHome,         "Home",         XK_Home);
+  @KEYSPEC(KeySpecEnd,          "End",          XK_End);
+  @KEYSPEC(KeySpecPageUp,       "PgUp",         XK_Page_Up);
+  @KEYSPEC(KeySpecPageDown,     "PgDn",         XK_Page_Down);
+  @KEYSPEC(KeySpecLeft,         "Left",         XK_Left);
+  @KEYSPEC(KeySpecUp,           "Up",           XK_Up);
+  @KEYSPEC(KeySpecRight,        "Right",        XK_Right);
+  @KEYSPEC(KeySpecDown,         "Down",         XK_Down);
+
+@ifdef NOKIA
+  @object UnderlinedGenTextClass KeyASCII = {
+    GI_visMoniker = "ASCII key";
+@else
+  @object GenTextClass KeyASCII = {
+    GI_visMoniker = "ASCII key:";
+@endif
+    GTXI_maxLength = 1;
+
+    HINT_ALIGN_WITH_CENTERED_MONIKERS;
+    ATTR_GEN_TEXT_NEVER_MAKE_SCROLLABLE;
+    HINT_MINIMUM_SIZE = {SST_WIDE_CHAR_WIDTHS | 1, SST_LINES_OF_TEXT | 1, 0};
+    HINT_INITIAL_SIZE = {SST_WIDE_CHAR_WIDTHS | 1, SST_LINES_OF_TEXT | 1, 0};
+    HINT_MAXIMUM_SIZE = {SST_WIDE_CHAR_WIDTHS | 1, SST_LINES_OF_TEXT | 1, 0};
+    HINT_TEXT_UNDERLINE;
+};
+
+@ifdef NOKIA
+@object GenTriggerClass KeyChange = {
+    GI_visMoniker = "Change";
+    HINT_SEEK_SLOT = 0;
+    HINT_SEEK_MENU_BAR;
+    ATTR_GEN_TRIGGER_INTERACTION_COMMAND = IC_CHANGE;
+};
+@endif
+
+@object GenTriggerClass KeySend = {
+    GI_visMoniker = "Send";
+    GTI_destination = process;
+    GTI_actionMsg = MSG_VNCV_PROCESS_KEY_SEND;
+@ifdef NOKIA
+    HINT_SEEK_SLOT = 1;
+    HINT_SEEK_MENU_BAR;
+@else
+    HINT_SEEK_REPLY_BAR;
+@endif
+};
+
+/***********************************************************************
+ *        Main Window elements
+ ***********************************************************************/
+
+@ifdef NOKIA
+@object GenInteractionClass ButtonLevel1 = {
+    GI_states = @default & ~GS_ENABLED;
+    GI_comp = @SendKeyTrig, @MouseTrig, @LookTrig, @LogOffTrig;
+}
+
+@object GenTriggerClass SendKeyTrig = {
+    GI_visMoniker = "Keys";
+    GTI_actionMsg = MSG_GEN_INTERACTION_INITIATE;
+    GTI_destination = @SendKeyDialog;
+    HINT_SEEK_MENU_BAR;
+    HINT_SEEK_SLOT = 0;
+    HINT_TRIGGER_BRINGS_UP_WINDOW;
+}
+
+@chunk TCHAR MouseTitle = "Mouse";
+@object ModeTriggerClass MouseTrig = {
+    CMI_topText = @MouseTitle;
+    TLTI_other_parent = @ButtonLevel2;
+    MTI_mode = MODE_MOUSING;
+    HINT_SEEK_MENU_BAR;
+    HINT_SEEK_SLOT = 1;
+}
+
+@chunk TCHAR ViewTitle = "View";
+@object ModeTriggerClass LookTrig = {
+    CMI_topText = @ViewTitle;
+    TLTI_other_parent = @ButtonLevel3;
+    MTI_mode = MODE_PANNING;
+    HINT_SEEK_MENU_BAR;
+    HINT_SEEK_SLOT = 2;
+}
+
+@object GenInteractionClass ButtonLevel2 = {
+    GI_comp = @LeftClick, @RightClick, @LeftDblClick, @MouseBackTrig;
+    GI_states = @default & ~GS_USABLE;
+}
+
+@object GenTriggerClass LeftClick = {
+    GI_visMoniker = "Left";
+    GTI_destination = process;
+    GTI_actionMsg = MSG_VNCV_PROCESS_MOUSE_LEFT;
+    HINT_SEEK_MENU_BAR;
+    HINT_SEEK_SLOT = 0;
+}
+
+@object GenTriggerClass RightClick = {
+    GI_visMoniker = "Right";
+    GTI_destination = process;
+    GTI_actionMsg = MSG_VNCV_PROCESS_MOUSE_RIGHT;
+    HINT_SEEK_MENU_BAR;
+    HINT_SEEK_SLOT = 1;
+}
+
+@chunk TCHAR LeftDblTitle = "Left\rDbl";
+@object ComplexMonikerClass LeftDblClick = {
+    ComplexMoniker = GenTriggerClass;
+    CMI_topText = @LeftDblTitle;
+    GTI_destination = process;
+    GTI_actionMsg = MSG_VNCV_PROCESS_MOUSE_LEFT_DBL;
+    HINT_SEEK_MENU_BAR;
+    HINT_SEEK_SLOT = 2;
+}
+
+@object ModeTriggerClass MouseBackTrig = {
+    TLTI_other_parent = @ButtonLevel1;
+    MTI_mode = MODE_THROUGH;
+    ATTR_TLT_IS_BACK_TRIGGER;
+    HINT_SEEK_MENU_BAR;
+    HINT_SEEK_SLOT = 3;
+}
+
+@object GenInteractionClass ButtonLevel3 = {
+    GI_comp = @LookBackTrig;
+    GI_states = @default & ~GS_USABLE;
+}
+
+@chunk TCHAR LookBackTitle = "";
+@object ModeTriggerClass LookBackTrig = {
+    CMI_topText = @LookBackTitle;
+    TLTI_other_parent = @ButtonLevel1;
+    MTI_mode = MODE_THROUGH;
+    HINT_SEEK_MENU_BAR;
+    HINT_SEEK_SLOT = 3;
+}
+@endif
+
+@object GenTriggerClass LogOffTrig = {
+@ifdef NOKIA
+    GI_visMoniker = "Detach";
+@else
+    GI_visMoniker = 'D',"Detach";
+@endif
+    GI_states = @default & ~GS_USABLE;
+    GTI_actionMsg = MSG_VNCV_PROCESS_LOGOFF;
+    GTI_destination = process;
+    HINT_SEEK_MENU_BAR;
+@ifdef NOKIA
+    HINT_SEEK_SLOT = 3;
+@endif
+};
+
+@object GenViewClass VNCViewView = {
+    GVI_attrs = @default | GVA_FOCUSABLE | GVA_CONTROLLED;
+    GVI_horizAttrs = @default | GVDA_SCROLLABLE | GVDA_NO_LARGER_THAN_CONTENT;
+    GVI_vertAttrs  = @default | GVDA_SCROLLABLE | GVDA_NO_LARGER_THAN_CONTENT;
+    GVI_content = process;
+    HINT_DEFAULT_TARGET;
+}
+
+/***********************************************************************
+ *        Status line
+ ***********************************************************************/
+
+@object GenInteractionClass StatusLine = {
+    GI_comp = @StatusText;
+    HINT_ORIENT_CHILDREN_HORIZONTALLY;
+    HINT_FULL_JUSTIFY_CHILDREN_HORIZONTALLY;
+    HINT_EXPAND_WIDTH_TO_FIT_PARENT;
+}
+
+@object GenTextClass StatusText = {
+    GI_attrs = (@default | GA_READ_ONLY) & ~GA_TARGETABLE;
+    GTXI_attrs = @default | GTA_SINGLE_LINE_TEXT;
+    HINT_EXPAND_WIDTH_TO_FIT_PARENT;
+@ifdef NOKIA
+    ATTR_GEN_TEXT_DEFAULT_CHAR_ATTR = (VTDS_FOAM_SMALL << VTDCA_SIZE_OFFSET) |
+                                       VTDF_RESPONDER;
+@endif
+}
+
+@end Interface;
+

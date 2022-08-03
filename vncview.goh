@@ -1,0 +1,223 @@
+/*
+ *      VNCView.goh
+ *
+ *      by Marcus Groeber
+ */
+
+#include <graphics.h>
+@include <socket.goh>
+@include <foam.goh>
+
+/*
+   Define the following constant to write a semi human-readable I/O log
+   to DOCUMENT\rfb.log.
+ */
+// #define LOGGING
+
+/*
+   Define the following constant to create a 2.0 compatible playback-only
+   version.
+ */
+// #define NOSOCKET
+
+/*
+   Replay is currently only supported in EC mode for debugging purposes...
+ */
+@ifdef DO_ERROR_CHECKING
+@define ENABLE_RECORD_REPLAY
+@endif
+
+#define LOCAL _near _pascal             /* only used within that module */
+
+
+/**************************************************************************
+ *        UI defintions
+ **************************************************************************/
+
+#define VNCVIEW_RECORD             0x0001
+
+#define VNCVIEW_DISPLAY_LENGTH     5
+
+#define KEY_SHIFT       1
+#define KEY_CTRL        2
+#define KEY_ALT         4
+#define KEY_META        8
+
+
+/**************************************************************************
+ *        RFB protocol definitions (Geos specific)
+ **************************************************************************/
+
+#define RFB_DOMAIN          "TCPIP"
+#define RFB_BASE_PORT       5900
+#define RFB_CONNECT_TIMEOUT (15*60)
+
+/* As RFB cannot recover from transmission failures, we will wait forever
+   for some data to arrive (that is, until the operation is interrupted). */
+#define RFB_RECEIVE_TIMEOUT SOCKET_NO_TIMEOUT
+
+/* fundamental types */
+typedef byte  CARD8;
+typedef word  CARD16;
+typedef dword CARD32;
+
+/* "endian" conversions between CARD16/32 and system data types */
+#define card16(w) ( (((word)(w))>>8) | (((word)(w))<<8) )
+#define card32(d) ( card16((d)>>16) | (((dword)card16(d))<<16) )
+
+/* password and challenge size in VNC authentication scheme */
+#define VNCVIEW_PASSWORD_LENGTH 40
+#define CHALLENGESIZE 16
+
+
+/**************************************************************************
+ *        RFB protocol definitions (generic)
+ **************************************************************************/
+
+#include "rfbproto.h"
+#include "keysymde.h"
+
+
+/**************************************************************************
+ *        Routines for RFB protocol handling
+ **************************************************************************/
+
+extern VMFileHandle frameFile;
+
+
+#define RFB_READ_BUF_SIZE 512
+
+typedef struct {
+  /*
+     Handle of block containing this structure (so a refrence to it can be
+     passed in a single word when creating the receiver thread):
+   */
+  MemHandle       RL_memHandle;
+
+  Boolean         RL_abort;
+  Boolean         RL_open;
+
+  SemaphoreHandle RL_threadSemaphore;
+
+  Socket          RL_socket;
+  FileHandle      RL_playbackFile;
+  byte            RL_readBuf[RFB_READ_BUF_SIZE];
+  word            RL_readBufTop;
+  word            RL_readBufPtr;
+
+  char            RL_password[16];
+
+  VMFileHandle    RL_frameFile;
+  VMBlockHandle   RL_frameBlock;
+  GStateHandle    RL_frameBitmap;
+
+  byte            RL_color[256];
+
+  BMFormat        RL_bmFormat;
+  byte            RL_cachedFillColor;
+  word            RL_screenWidth;
+  word            RL_screenHeight;
+
+  dword           RL_startTime;
+} RFBlink;
+
+
+typedef enum {
+  RFBE_NO_ERROR = 0,
+  RFBE_NO_ACCESS_POINT,
+  RFBE_CANNOT_RESOLVE,
+  RFBE_CANNOT_CONNECT,
+  RFBE_COMM_ERROR,
+  RFBE_UNSUPPORTED_PROTOCOL,
+  RFBE_CONNECTION_FAILED,
+  RFBE_AUTHENTICATION_FAILED,
+  RFBE_AUTHENTICATION_TOO_MANY,
+  RFBE_CANNOT_CREATE_BITMAP,
+} RFBError;
+
+RFBError RFBConnect(char *host, word display, char *pwd, word accPnt,
+  RFBlink **link);
+void RFBDisconnect(RFBlink *link);
+
+#ifdef LOGGING
+  void LogPrintf(char *fmt, ...);
+  #define LOG(x) x
+#else
+  #define LOG(x)
+#endif
+
+RFBError OpenSocket(RFBlink *link, char *host, word display, word accPnt);
+SocketError SendData(RFBlink *link, byte *buf, word size);
+SocketError ReceiveData(RFBlink *link, byte *buf, word size);
+void CloseSocket(RFBlink *link);
+
+RFBError NegotiateVersion(RFBlink *link);
+RFBError Authenticate(RFBlink *link, char *password);
+RFBError NegotiateParameters(RFBlink *link);
+
+SocketError SendFramebufferUpdateRequest(RFBlink *link, Boolean incremental,
+  word xpos, word ypos, word width, word height);
+SocketError SendMouseEvent(RFBlink *link, word xpos,word ypos,word inputState);
+SocketError SendKeyEvent(RFBlink *link, dword key, Boolean downFlag);
+word MapKey(word key);
+
+
+/**************************************************************************
+ *        Main VNC Viewer process object
+ **************************************************************************/
+
+typedef enum {
+  RFBS_NONE = 0,
+  RFBS_CONNECTING,
+  RFBS_AUTHENTICATING,
+  RFBS_NEGOTIATING,
+  RFBS_UPDATE_REQUEST,
+  RFBS_UPDATING,
+  RFBS_CLIPBOARD_SYNC,
+  RFBS_CLOSING
+} RFBStatus;
+
+
+@class    VNCViewProcessClass, GenProcessClass;
+  @message void MSG_VNCV_PROCESS_LOGON();
+  @message void MSG_VNCV_PROCESS_REPLAY();
+  @message void MSG_VNCV_PROCESS_LOGOFF();
+
+  @message (GEN_ITEM_GROUP_STATUS_MSG) MSG_VNCV_PROCESS_KEY_CHANGED;
+  @message void MSG_VNCV_PROCESS_KEY_SEND();
+
+  @message void MSG_VNCV_PROCESS_UPDATE_STATUS(RFBStatus status);
+  @message void MSG_VNCV_PROCESS_REQUEST_UPDATE(RFBlink *link,
+    Boolean incremental);
+  @message void MSG_VNCV_PROCESS_RFB_THREAD_CONNECTED(RFBlink *link);
+  @message void MSG_VNCV_PROCESS_UPDATE(RFBlink *link,
+    sword left, sword top, sword right, sword bottom);
+  @message void MSG_VNCV_PROCESS_ACK_UPDATE(RFBlink *link);
+  @message void MSG_VNCV_PROCESS_RFB_THREAD_ENDED(RFBlink *link, RFBError err);
+
+@ifdef NOKIA
+  @message void MSG_VNCV_PROCESS_HOME_MOUSE();
+  @message void MSG_VNCV_PROCESS_MOVE_MOUSE_BY(sword dx, sword dy);
+
+  @message void MSG_VNCV_PROCESS_MODE_SWITCH(word mode);
+
+  @message void MSG_VNCV_PROCESS_MOUSE_LEFT();
+  @message void MSG_VNCV_PROCESS_MOUSE_LEFT_DBL();
+  @message void MSG_VNCV_PROCESS_MOUSE_RIGHT();
+@endif
+@endc;
+
+
+/**************************************************************************
+ *        TwoLevelTriggerClass that notifies the process of mode switches
+ **************************************************************************/
+
+#define MODE_THROUGH 0
+#define MODE_MOUSING 1
+#define MODE_PANNING 2
+
+@ifdef NOKIA
+@class    ModeTriggerClass, TwoLevelTriggerClass;
+  @instance word MTI_mode;
+@endc;
+@endif

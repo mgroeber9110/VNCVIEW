@@ -1,0 +1,54 @@
+VNC Viewer for Geos - revision history
+======================================
+
+99/04/25 [1.0.0.27] - Geos 3.0 build:
+98/04/25 [1.0.0.32] - Nokia 9000 build:
+
+ - Increased socket receive buffer to take better advantage of TCP/IP sliding
+   window handshaking (i.e. performance improvement).
+
+ - Added support for CopyRect encoding.
+
+ - Password is now displayed "*" when entered.
+
+ - "Connect" dialog opens automatically when the program launches.
+
+ - Nokia: no longer moves mouse cursor when panning around the screen.
+
+ - Added support for cutting text via the server's clipboard.
+
+ - Removed experimental "unbuffered" mode. The program now always maintains an
+   offscreen bitmap.
+
+ - Removed incomplete recording/playback feature for the time being... It may
+   come back if there is enough demand.
+
+ - Added support for "bell" events (sounds).
+
+ - Added dialog to send user-defined keystroke combinations to the server.
+
+ - Nokia: added mouse emulation mode via cursor keys.
+
+ - Nokia: added "View" mode for scrolling with cursor keys.
+
+ - Increased password size limit to 40 characters.
+
+ - Nokia: added application list icon and fixed colors in status icon.
+
+ - Desktop: added small "NewDeal" style icons
+
+ - Fixed crashes related to closing application without shutting down
+   connection.
+
+ - Added plain text error messages when connection fails.
+
+ - Server name and display number are automatically remembered when the
+   program is restarted.
+
+ - Checking for errors when temporary file for offscreen bitmap is created.
+
+98/06/08 [0.9.0.37] - Geos 3.0 build:
+98/05/26 [0.9.0.36] - Nokia 9000 build:
+
+ - First public alpha version, also released for Basel Contest
+
